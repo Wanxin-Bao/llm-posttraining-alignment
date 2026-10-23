@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+.venv/
+.venv-*/
+
+# Training outputs
+outputs/
+checkpoints/
+
+# Local datasets / cache
+data/cache/
+
+# Hugging Face / experiment cache
+.cache/
+wandb/
+
+# Logs
+*.log
+logs/
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/

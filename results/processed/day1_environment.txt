@@ -1,0 +1,8 @@
+Hardware: NVIDIA GeForce RTX 3090
+PyTorch: 2.10.0+cu128
+PyTorch CUDA runtime: 12.8
+Transformers: 5.20.2
+Datasets: 5.1.0
+Accelerate: 1.15.0
+PEFT: 0.21.2
+TRL: 1.16.0

@@ -1,0 +1,27 @@
+[
+  {
+    "id": 1,
+    "prompt": "Explain why the sky appears blue in simple terms.",
+    "response": "⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ �"
+  },
+  {
+    "id": 2,
+    "prompt": "Write a Python function that returns the largest number in a list.",
+    "response": "⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ �"
+  },
+  {
+    "id": 3,
+    "prompt": "Give me three practical tips for preparing for a technical interview.",
+    "response": "⚇ ⚇ ⚇\n1. **Understand the Problem Statement**: Before diving into the code, make sure you fully understand the problem statement. This includes identifying the input, output, and constraints. A clear understanding will help you write more efficient and correct code.\n\n2. **Break Down the Problem**: If the problem is complex, break it down into smaller, manageable parts. This will help you focus on solving each part individually and ensure that you don’t miss any critical details.\n\n3. **Practice with Examples**: Write test cases and examples to verify your solution. This will help you catch any edge cases or"
+  },
+  {
+    "id": 4,
+    "prompt": "What is the difference between supervised learning and reinforcement learning?",
+    "response": "⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ �"
+  },
+  {
+    "id": 5,
+    "prompt": "Write a polite email asking a professor for a meeting next week.",
+    "response": "⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ ⚙ �"
+  }
+]
