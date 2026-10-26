@@ -1,0 +1,16 @@
+Date: Mon 26 Oct 2026 04:43:20 PM JST
+
+Python:
+Python 3.12.14
+
+PyTorch / CUDA:
+torch: 2.10.0+cu128
+torch CUDA runtime: 12.8
+CUDA available: True
+GPU: NVIDIA GeForce RTX 3090
+BF16 supported: True
+transformers: 5.20.2
+datasets: 5.1.0
+accelerate: 1.15.0
+peft: 0.21.2
+trl: 1.16.0

@@ -251,3 +251,232 @@ Day 2 changed the supervision signal from absolute target responses to relative 
 **SFT learns how to answer; reward modeling learns which answer should be preferred.**
 
 The trained reward model will later provide the explicit reward signal required for the PPO stage of the project. In contrast, DPO will demonstrate how preference optimization can update the policy directly without training or querying a separate reward model during optimization.
+
+## Day 3 — Direct Preference Optimization
+
+### Objective
+
+Day 3 applies **Direct Preference Optimization (DPO)** to the supervised fine-tuned Qwen3-0.6B policy from Day 1.
+
+Unlike the classical RLHF pipeline used for reward modeling and PPO, DPO does not require an explicit reward model during policy optimization. Instead, it directly learns from preference pairs consisting of a preferred (`chosen`) and dispreferred (`rejected`) response.
+
+The trainable policy and frozen reference policy are both initialized from the Day 1 SFT checkpoint:
+
+```text
+Qwen3-0.6B-SFT
+      │
+      ├── Trainable policy πθ
+      │
+      └── Frozen reference policy πref
+                │
+                ▼
+       chosen / rejected pairs
+                │
+                ▼
+              DPO
+```
+
+### DPO Objective
+
+For a prompt \(x\), preferred response \(y_c\), and rejected response \(y_r\), the DPO loss is
+
+\[
+\mathcal{L}_{DPO}
+=
+-\log \sigma
+\left(
+\beta
+\left[
+\log \frac{\pi_\theta(y_c|x)}
+{\pi_{\mathrm{ref}}(y_c|x)}
+-
+\log \frac{\pi_\theta(y_r|x)}
+{\pi_{\mathrm{ref}}(y_r|x)}
+\right]
+\right).
+\]
+
+The frozen SFT reference model acts as an anchor, allowing preference optimization without allowing the policy to drift arbitrarily far from the original instruction-following behavior.
+
+At initialization,
+
+\[
+\pi_\theta = \pi_{\mathrm{ref}},
+\]
+
+so both implicit rewards are zero and the theoretical initial loss is
+
+\[
+-\log \sigma(0)
+=
+0.6931.
+\]
+
+This was reproduced by the implementation during the pre-DPO evaluation.
+
+### Preference Dataset
+
+The same preference source used for Day 2 reward modeling was used:
+
+```text
+HuggingFaceH4/ultrafeedback_binarized
+```
+
+Pairs with equal preference scores were removed:
+
+```text
+score_chosen > score_rejected
+```
+
+This retained:
+
+```text
+Training preference pairs:   53,748
+Evaluation preference pairs:  1,728
+```
+
+The DPO representation explicitly separates the common prompt from the two assistant completions:
+
+```text
+prompt
+├── chosen assistant response
+└── rejected assistant response
+```
+
+A maximum sequence length of 1024 tokens was retained from the Day 2 dataset analysis.
+
+### Training Configuration
+
+```text
+Model initialization       Qwen3-0.6B-SFT
+Training method            Full-parameter DPO
+Epochs                     1
+Beta                       0.1
+Learning rate              1e-6
+Max sequence length        1024
+Precision                  BF16
+Per-device batch size      1
+Gradient accumulation      8
+Effective batch size       8
+Optimizer                  AdamW fused
+Gradient checkpointing     Enabled
+Hardware                   NVIDIA RTX 3090
+```
+
+A small learning-rate study was performed before the full run.
+
+| Configuration | Eval Loss | Preference Accuracy | Reward Margin |
+|---|---:|---:|---:|
+| 200 steps, LR \(5\times10^{-7}\) | 0.6940 | 46.53% | 0.0008 |
+| 200 steps, LR \(1\times10^{-6}\) | 0.6924 | 51.29% | 0.0043 |
+| 1000 steps, LR \(1\times10^{-6}\) | 0.6794 | 59.38% | 0.0330 |
+
+The larger learning rate produced a clearer optimization signal and was therefore selected for the full one-epoch run.
+
+### Full DPO Results
+
+The final training run completed one full epoch in approximately 3.7 hours.
+
+```text
+Training loss:              0.6523
+Evaluation loss:            0.6493
+Held-out preference acc.:   65.73%
+Implicit reward margin:     0.1173
+
+Chosen implicit reward:    -0.0909
+Rejected implicit reward:  -0.2082
+```
+
+The evaluation loss decreased from the neutral DPO initialization of approximately 0.6931 to 0.6493, while held-out preference accuracy reached 65.73%.
+
+Both chosen and rejected implicit rewards became negative. However, the rejected responses were suppressed substantially more strongly:
+
+\[
+-0.0909 > -0.2082.
+\]
+
+Consequently,
+
+\[
+r_{\mathrm{chosen}} - r_{\mathrm{rejected}}
+=
+0.1173 > 0.
+\]
+
+This shows that preference separation emerged primarily by decreasing the relative likelihood of rejected responses more strongly than that of chosen responses, rather than simply increasing the absolute probability of preferred responses.
+
+### SFT vs. DPO Generation Evaluation
+
+DPO training metrics alone do not establish that free-generated responses are better than those produced by the original SFT policy.
+
+To evaluate actual generation behavior, both models generated responses for 1,000 held-out prompts using deterministic decoding. The separately trained Day 2 reward model then scored each SFT and DPO response.
+
+```text
+Prompts evaluated:       1000
+
+DPO preferred:            404 (40.40%)
+SFT preferred:            322 (32.20%)
+Ties:                     274 (27.40%)
+
+Mean SFT reward:          0.4366
+Mean DPO reward:          0.5298
+Mean reward difference:  +0.0932
+```
+
+Among examples for which the reward model expressed a strict preference,
+
+\[
+\text{DPO win rate}
+=
+\frac{404}{404+322}
+=
+55.65\%.
+\]
+
+### Response Preservation Analysis
+
+The relatively large number of reward ties was investigated further.
+
+Of the 274 ties:
+
+```text
+Identical SFT/DPO responses: 260
+Different responses:           14
+```
+
+Therefore, 94.89% of reward ties occurred because the SFT and DPO policies generated exactly the same response.
+
+Across all 1,000 prompts:
+
+```text
+Exact same response:   260 (26.0%)
+Changed response:      740 (74.0%)
+```
+
+Among changed responses:
+
+```text
+DPO wins:              404
+SFT wins:              322
+Reward-model ties:      14
+```
+
+Excluding the 14 unresolved ties, the DPO policy achieved a 55.65% win rate among cases in which post-training actually changed the generated response.
+
+This suggests that DPO produced a moderate positive preference shift while retaining part of the original SFT behavior.
+
+### Interpretation
+
+The Day 3 experiments demonstrate two complementary effects.
+
+First, the DPO policy successfully learned the pairwise preference objective, reaching 65.73% held-out preference accuracy and increasing the implicit reward margin from zero to 0.1173.
+
+Second, this optimization transferred to free generation. A separately trained reward model preferred DPO generations more frequently than SFT generations, with a 55.65% win rate when ties were excluded.
+
+The improvement was moderate rather than universal: approximately one quarter of evaluated prompts produced exactly the same response before and after DPO, and SFT remained preferred on a substantial fraction of changed generations.
+
+### Limitation
+
+The Day 2 reward model and Day 3 DPO policy are separately trained models, but both learn from the UltraFeedback preference distribution.
+
+Therefore, the reward-model evaluation should be interpreted as evidence of improved alignment to the learned UltraFeedback preference distribution rather than as an independent measurement of human preference or absolute response quality.

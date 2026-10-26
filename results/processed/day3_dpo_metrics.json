@@ -1,0 +1,85 @@
+{
+  "base_checkpoint": "outputs/qwen3-0.6b-sft",
+  "dataset": "HuggingFaceH4/ultrafeedback_binarized",
+  "preference_filter": "score_chosen > score_rejected",
+  "positive_margin_train_pairs": 53748,
+  "positive_margin_eval_pairs": 1728,
+
+  "training": {
+    "method": "full_parameter_dpo",
+    "epochs": 1.0,
+    "beta": 0.1,
+    "learning_rate": 1e-6,
+    "max_length": 1024,
+    "precision": "bfloat16",
+    "per_device_train_batch_size": 1,
+    "gradient_accumulation_steps": 8,
+    "effective_batch_size": 8,
+    "optimizer": "adamw_torch_fused",
+    "gradient_checkpointing": true,
+    "train_runtime_seconds": 13300.0132,
+    "train_samples_per_second": 3.976,
+    "train_steps_per_second": 0.497,
+    "train_loss": 0.6523040412278471
+  },
+
+  "heldout_dpo_evaluation": {
+    "evaluated_pairs": 1704,
+    "eval_loss": 0.6492679119110107,
+    "preference_accuracy": 0.6572769953051644,
+    "implicit_reward_margin": 0.11732636578476707,
+    "chosen_implicit_reward": -0.09091534151897224,
+    "rejected_implicit_reward": -0.20824170750789914,
+    "chosen_log_probability": -332.9019656360429,
+    "rejected_log_probability": -293.552510815607,
+    "mean_token_accuracy": 0.6994979748668525
+  },
+
+  "external_reward_model_evaluation": {
+    "evaluator": "outputs/qwen3-0.6b-reward",
+    "num_prompts": 1000,
+    "dpo_wins": 404,
+    "dpo_win_rate_all": 0.404,
+    "sft_wins": 322,
+    "sft_win_rate_all": 0.322,
+    "ties": 274,
+    "tie_rate": 0.274,
+    "mean_sft_reward": 0.4365939865112305,
+    "mean_dpo_reward": 0.5297806091308593,
+    "mean_reward_difference": 0.0931866226196289,
+
+    "identical_sft_dpo_responses": 260,
+    "identical_response_rate": 0.26,
+    "changed_responses": 740,
+    "different_response_reward_ties": 14,
+    "dpo_wins_among_changed": 404,
+    "sft_wins_among_changed": 322,
+    "dpo_win_rate_changed_non_ties": 0.5565
+  },
+
+  "development_runs": [
+    {
+      "steps": 200,
+      "learning_rate": 5e-7,
+      "eval_loss": 0.6939771175384521,
+      "preference_accuracy": 0.46534653465346537,
+      "reward_margin": 0.0008111206653278948
+    },
+    {
+      "steps": 200,
+      "learning_rate": 1e-6,
+      "eval_loss": 0.6924456357955933,
+      "preference_accuracy": 0.5128712871287129,
+      "reward_margin": 0.004333439298748675
+    },
+    {
+      "steps": 1000,
+      "learning_rate": 1e-6,
+      "eval_loss": 0.6794201135635376,
+      "preference_accuracy": 0.5938430983118173,
+      "reward_margin": 0.03298457326637322
+    }
+  ],
+
+  "hardware": "NVIDIA GeForce RTX 3090"
+}
