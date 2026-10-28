@@ -25,3 +25,8 @@ logs/
 .DS_Store
 .vscode/
 .idea/
+
+# Generated PPO artifacts
+compat/
+data/
+results/processed/day4_length_ablation/

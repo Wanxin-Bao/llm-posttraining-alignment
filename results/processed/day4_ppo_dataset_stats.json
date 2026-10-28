@@ -1,0 +1,13 @@
+{
+  "source_dataset": "HuggingFaceH4/ultrafeedback_binarized",
+  "source_split": "train_prefs",
+  "raw_train_pairs": 61135,
+  "positive_margin_pairs": 53748,
+  "deduplicated_prompts": 53737,
+  "max_prompt_length": 512,
+  "prompts_after_length_filter": 49897,
+  "internal_eval_prompts": 100,
+  "ppo_train_prompts": 49797,
+  "seed": 42,
+  "final_external_eval_split": "test_prefs"
+}

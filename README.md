@@ -480,3 +480,588 @@ The improvement was moderate rather than universal: approximately one quarter of
 The Day 2 reward model and Day 3 DPO policy are separately trained models, but both learn from the UltraFeedback preference distribution.
 
 Therefore, the reward-model evaluation should be interpreted as evidence of improved alignment to the learned UltraFeedback preference distribution rather than as an independent measurement of human preference or absolute response quality.
+
+## Day 4 — PPO: Online RLHF with Reward and Value Models
+
+### Goal
+
+Day 4 implements **Proximal Policy Optimization (PPO)** as a classical online RLHF baseline.
+
+Unlike SFT, reward modeling, and DPO, which train on fixed offline responses, PPO performs **online rollouts**:
+
+1. Sample prompts from a prompt-only dataset.
+2. Generate responses using the current policy.
+3. Score generated responses with a frozen reward model.
+4. Apply a KL penalty relative to the frozen SFT reference policy.
+5. Estimate advantages using a trainable value model and GAE.
+6. Update the policy using the PPO clipped objective.
+7. Update the value model to predict future returns.
+
+The main comparison is therefore:
+
+```text
+SFT → DPO
+vs.
+SFT → PPO
+```
+
+Both methods start from the same Day 1 SFT checkpoint.
+
+---
+
+### Model Components
+
+The PPO pipeline uses four model roles:
+
+```text
+Policy
+  └── Day 1 SFT checkpoint
+      trainable
+
+Reference Policy
+  └── Day 1 SFT checkpoint
+      frozen
+
+Reward Model
+  └── Day 2 reward-model checkpoint
+      frozen
+
+Value Model / Critic
+  └── initialized from Day 2 reward-model checkpoint
+      trainable
+```
+
+The policy and reference policy start from identical SFT weights.
+
+The reward model evaluates the complete generated response, while the value model learns to predict expected future return from intermediate generation states.
+
+---
+
+### PPO Objective
+
+For a sampled action \(a_t\) at state \(s_t\), the KL-related log-ratio relative to the frozen reference policy is
+
+\[
+k_t =
+\log \pi_\theta(a_t|s_t)
+-
+\log \pi_{\text{ref}}(a_t|s_t).
+\]
+
+The token-level KL reward is
+
+\[
+r_t^{\mathrm{KL}}
+=
+-\beta_{\mathrm{KL}} k_t.
+\]
+
+The reward-model score is added to the final valid response token.
+
+Advantages are estimated using Generalized Advantage Estimation:
+
+\[
+\delta_t
+=
+r_t
++
+\gamma V(s_{t+1})
+-
+V(s_t),
+\]
+
+\[
+A_t
+=
+\delta_t
++
+\gamma\lambda A_{t+1}.
+\]
+
+The PPO policy update uses
+
+\[
+r_t(\theta)
+=
+\frac{
+\pi_\theta(a_t|s_t)
+}{
+\pi_{\mathrm{old}}(a_t|s_t)
+},
+\]
+
+and the clipped objective
+
+\[
+L_{\mathrm{PPO}}
+=
+-
+\mathbb{E}
+\left[
+\min
+\left(
+r_t(\theta)A_t,
+\operatorname{clip}
+(
+r_t(\theta),
+1-\epsilon,
+1+\epsilon
+)
+A_t
+\right)
+\right].
+\]
+
+The frozen SFT reference policy and the PPO old policy have different roles:
+
+- **Reference policy:** controls long-term drift through the KL penalty.
+- **Old policy:** controls the size of each individual PPO update.
+
+---
+
+### Prompt-Only Dataset
+
+PPO requires prompts rather than fixed chosen/rejected response pairs.
+
+The prompt dataset was derived from the same UltraFeedback preference data used in Days 2–3.
+
+Preparation:
+
+```text
+Raw train_prefs:             61,135
+Positive-margin pairs:       53,748
+After prompt deduplication:  53,737
+Prompt length ≤ 512:         49,897
+
+PPO train prompts:           49,797
+Internal eval prompts:          100
+```
+
+Prompts longer than 512 tokens were dropped rather than truncated to avoid corrupting instructions.
+
+The final dataset contains only:
+
+```text
+input_ids
+```
+
+and is stored at:
+
+```text
+data/ppo_prompts_512
+```
+
+---
+
+### Manual PPO Diagnostics
+
+Before running PPO training, several small diagnostic scripts were used to inspect the full RLHF pipeline.
+
+#### Online rollout
+
+The SFT policy generated responses online and the frozen reward model scored them.
+
+One rollout revealed an important limitation of learned reward models: a response that failed the requested output format still received a positive reward.
+
+This demonstrates a practical RLHF concern:
+
+```text
+Reward model score ≠ guaranteed response quality
+```
+
+and motivates monitoring for reward-model errors and reward hacking.
+
+#### KL verification
+
+At initialization,
+
+```text
+Policy = Reference Policy
+```
+
+therefore
+
+\[
+\log
+\frac{\pi_\theta}{\pi_{\text{ref}}}
+=
+0.
+\]
+
+The manual test confirmed zero sampled KL at initialization.
+
+#### Value and GAE inspection
+
+The value model was initialized from the reward-model checkpoint.
+
+Because the reward model was trained to score complete responses rather than partial generation states, its initial value estimates were noisy.
+
+This is expected: during PPO, the critic must learn a different task—
+
+> predicting expected future return from partial generation states.
+
+---
+
+### Rollout-Length Ablation
+
+Initial rollouts frequently reached the maximum response length without generating EOS.
+
+A controlled ablation compared:
+
+```text
+response_length = 128
+response_length = 256
+```
+
+All other PPO settings were held constant.
+
+| Metric | 128 tokens | 256 tokens |
+|---|---:|---:|
+| Episodes | 64 | 64 |
+| EOS rate | 46.88% | **67.19%** |
+| Mean RM score | -1.8174 | **-1.4940** |
+| Mean RLHF reward | -1.8329 | **-1.5029** |
+| Mean sampled KL | 0.3107 | 0.1777 |
+| PPO approx KL | 0.000995 | 0.000585 |
+| Value loss | 1.5359 | 1.5844 |
+| Policy ratio | 0.999442 | 0.999872 |
+| Clip fraction | 0.66% | 2.02% |
+| Peak VRAM | 5524 MiB | 5610 MiB |
+
+Increasing the rollout budget from 128 to 256 tokens improved the EOS completion rate by more than 20 percentage points while increasing peak GPU memory by only approximately 86 MiB.
+
+Therefore:
+
+```text
+response_length = 256
+```
+
+was selected for the main PPO experiment.
+
+---
+
+### Main PPO Configuration
+
+```text
+Policy initialization        Day 1 SFT
+Reference policy             frozen Day 1 SFT
+Reward model                 frozen Day 2 RM
+Value model                  Day 2 RM initialization
+
+Prompt length                ≤ 512
+Response length              256
+
+Total episodes               4096
+Learning rate                1e-6
+Temperature                  0.7
+
+Per-device train batch       1
+Gradient accumulation        4
+Rollout batch                4
+
+PPO epochs                   1
+Mini-batches                 1
+
+KL coefficient               0.05
+Policy clip range            0.2
+Value clip range             0.2
+Value-loss coefficient       0.1
+
+Gamma                        1.0
+GAE lambda                   0.95
+
+Missing-EOS penalty          1.0
+
+Precision                    BF16
+Training                     full-parameter
+```
+
+The final policy is saved to:
+
+```text
+outputs/qwen3-0.6b-ppo
+```
+
+---
+
+### Training Results
+
+The 4096-episode PPO run completed successfully.
+
+```text
+PPO updates:   1024
+Episodes:      4096
+Runtime:       ~3 h 39 min
+```
+
+Overall statistics:
+
+| Metric | Value |
+|---|---:|
+| Mean RM score | -1.6006 |
+| Mean RLHF reward | -1.6169 |
+| Mean sampled KL | 0.3267 |
+| PPO approx KL | 0.000705 |
+| Policy ratio | 0.999939 |
+| Clip fraction | 0.69% |
+| Value loss | 1.2342 |
+| EOS rate | 67.04% |
+
+The training process remained numerically stable:
+
+```text
+No NaNs
+No CUDA OOM
+Policy ratio ≈ 1
+Very low PPO clipping fraction
+Small per-update approximate KL
+```
+
+---
+
+### Critic Learning
+
+The value loss decreased consistently across training:
+
+| Training quarter | Value loss |
+|---|---:|
+| Q1 | 1.4248 |
+| Q2 | 1.2450 |
+| Q3 | 1.1522 |
+| Q4 | **1.1146** |
+
+This indicates that the critic progressively learned to estimate PPO returns from partial generation states.
+
+---
+
+### Policy Drift
+
+The sampled KL relative to the frozen SFT reference increased during training:
+
+| Training quarter | Sampled KL |
+|---|---:|
+| Q1 | 0.2492 |
+| Q2 | 0.2960 |
+| Q3 | 0.3356 |
+| Q4 | **0.4261** |
+
+At the same time, the PPO per-update ratio remained approximately 1.
+
+This indicates a useful distinction:
+
+```text
+Each individual PPO update was small,
+but many small updates accumulated into measurable drift from the SFT policy.
+```
+
+The EOS rate remained approximately constant:
+
+```text
+Q1: 67.29%
+Q2: 67.38%
+Q3: 66.02%
+Q4: 67.48%
+```
+
+Therefore the missing-EOS penalty did not produce a measurable improvement in completion behavior during this run.
+
+---
+
+### Held-Out Evaluation: SFT vs PPO
+
+The final PPO policy was evaluated on 1000 held-out prompts using the same protocol as the Day 3 DPO evaluation.
+
+For each prompt:
+
+```text
+SFT → greedy response
+PPO → greedy response
+
+Frozen Day 2 RM → score both responses
+```
+
+Results:
+
+| Metric | Result |
+|---|---:|
+| PPO wins | 303 / 1000 |
+| SFT wins | 304 / 1000 |
+| Ties | 393 / 1000 |
+| Mean SFT reward | 0.436594 |
+| Mean PPO reward | 0.427900 |
+| Mean reward difference | **-0.008694** |
+| PPO non-tie win rate | **49.92%** |
+
+The PPO checkpoint therefore showed **no measurable preference improvement over the SFT baseline** under this evaluation protocol.
+
+---
+
+### Response-Change Analysis
+
+The PPO policy nevertheless changed a substantial fraction of greedy outputs:
+
+```text
+Identical responses: 381 / 1000 = 38.10%
+Changed responses:   619 / 1000 = 61.90%
+```
+
+Among the 619 changed responses:
+
+```text
+PPO wins:        303
+SFT wins:        304
+Reward ties:      12
+
+PPO non-tie win rate: 49.92%
+```
+
+Therefore the result is not simply explained by PPO failing to change the policy.
+
+Instead:
+
+> PPO changed many outputs, but the changes did not have a consistent positive preference direction.
+
+---
+
+### Reward-Margin Analysis
+
+Define
+
+\[
+m_{\mathrm{PPO}}
+=
+R(\mathrm{PPO})
+-
+R(\mathrm{SFT}).
+\]
+
+For PPO:
+
+```text
+Positive margins:       303
+Negative margins:       304
+Zero margins:           393
+
+Mean margin:           -0.008694
+Median margin:          0.000000
+Mean absolute margin:   0.443561
+
+Mean positive margin:  +0.717602
+Mean negative margin:  -0.743841
+
+Changed mean margin:   -0.014046
+```
+
+The positive and negative changes are nearly symmetric.
+
+This suggests that the PPO policy updates were:
+
+```text
+stable,
+relatively conservative,
+but approximately directionless with respect to held-out reward preference.
+```
+
+There was no evidence of catastrophic PPO instability or reward collapse.
+
+---
+
+### DPO vs PPO
+
+Using the same 1000-prompt held-out evaluation:
+
+| Metric | DPO | PPO |
+|---|---:|---:|
+| Alignment-model wins | **404** | 303 |
+| SFT wins | 322 | 304 |
+| Ties | 274 | 393 |
+| Non-tie win rate | **55.65%** | 49.92% |
+| Mean reward improvement | **+0.093187** | -0.008694 |
+| Identical responses | 260 | 381 |
+| Changed responses | **740** | 619 |
+| Changed mean margin | **+0.125928** | -0.014046 |
+| Mean absolute margin | **0.623175** | 0.443561 |
+
+DPO produced both:
+
+1. more behavioral change, and
+2. a clearer positive preference direction.
+
+PPO changed fewer responses, and its positive and negative reward shifts were nearly balanced.
+
+---
+
+### Interpretation
+
+The PPO run was technically successful:
+
+- online rollouts worked correctly;
+- the reward model provided online feedback;
+- KL regularization constrained policy drift;
+- the value model learned during training;
+- PPO updates remained numerically stable;
+- full-parameter PPO fit comfortably on a single RTX 3090.
+
+However, stability alone did not translate into better held-out preference performance.
+
+The final PPO policy changed 61.9% of held-out greedy responses, but those changes were almost evenly split between improvements and regressions according to the frozen reward model.
+
+Under the current configuration:
+
+\[
+\boxed{
+\text{SFT}\rightarrow\text{DPO}
+\text{ produced a clearer preference improvement than }
+\text{SFT}\rightarrow\text{PPO}.
+}
+\]
+
+This result should not be interpreted as a general claim that DPO is superior to PPO. The two experiments used different optimization structures and training budgets, and PPO performance is sensitive to learning rate, KL strength, rollout budget, reward-model quality, and the number of online episodes.
+
+For this project, the current PPO run is retained as a stable online-RLHF baseline rather than performing an extensive PPO hyperparameter sweep.
+
+---
+
+### Key Takeaways
+
+- PPO differs fundamentally from DPO because responses are generated **online by the current policy**.
+- The reward model provides the optimization target, while the value model performs return prediction and supports credit assignment.
+- KL regularization controls drift from the original SFT policy.
+- PPO clipping controls the size of each individual policy update.
+- A critic initialized from a reward model is initially noisy but can learn substantially during PPO.
+- Longer rollout budgets substantially improved EOS completion with negligible additional memory cost.
+- Stable PPO optimization does not guarantee improved held-out preference performance.
+- In this experiment, DPO produced a stronger and more consistent positive preference shift than PPO.
+
+---
+
+### Main Scripts
+
+```text
+scripts/prepare_ppo_dataset.py
+    Prepare the prompt-only PPO dataset.
+
+scripts/inspect_ppo_rollout.py
+    Inspect online SFT rollouts and reward-model scores.
+
+scripts/inspect_ppo_kl.py
+    Verify policy/reference KL behavior.
+
+scripts/inspect_ppo_advantage.py
+    Inspect reward, value, GAE, return, and normalized advantage.
+
+scripts/train_ppo_smoke.py
+    Small PPO smoke tests and rollout-length ablations.
+
+scripts/train_ppo.py
+    Main PPO training script.
+
+scripts/summarize_ppo_training.py
+    Aggregate PPO training diagnostics.
+
+scripts/evaluate_sft_vs_ppo.py
+    Held-out SFT-vs-PPO evaluation.
+
+scripts/compare_dpo_ppo_margins.py
+    Compare DPO and PPO held-out reward-margin distributions.
+```
