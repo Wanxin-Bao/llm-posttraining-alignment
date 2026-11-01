@@ -1065,3 +1065,702 @@ scripts/evaluate_sft_vs_ppo.py
 scripts/compare_dpo_ppo_margins.py
     Compare DPO and PPO held-out reward-margin distributions.
 ```
+
+## Day 5 — GRPO: Group-Relative Online Reinforcement Learning
+
+### Goal
+
+Day 5 implements **Group Relative Policy Optimization (GRPO)** as a second online reinforcement-learning baseline.
+
+GRPO shares the online nature of PPO: responses are sampled from the current policy during training rather than taken from a fixed preference dataset.
+
+The key difference is how the learning signal is constructed.
+
+PPO uses a learned value model:
+
+\[
+R
+\rightarrow
+V(s)
+\rightarrow
+\mathrm{GAE}
+\rightarrow
+A_t
+\]
+
+whereas GRPO samples multiple completions for the same prompt and constructs relative advantages directly from their rewards:
+
+\[
+R_1,\ldots,R_G
+\rightarrow
+\text{group normalization}
+\rightarrow
+A_1,\ldots,A_G.
+\]
+
+This removes the need for a separate critic/value model.
+
+For a group of \(G\) sampled completions with rewards \(r_i\),
+
+\[
+A_i
+=
+\frac{
+r_i-\operatorname{mean}(r)
+}{
+\operatorname{std}(r)+\epsilon
+}.
+\]
+
+A completion can therefore receive a positive advantage even when its absolute reward is negative, as long as it performs better than the other completions generated for the same prompt.
+
+---
+
+### GRPO Pipeline
+
+```text
+Prompt
+  |
+  v
+Current SFT-initialized policy
+  |
+  +-- completion 1 -> reward 1
+  +-- completion 2 -> reward 2
+  +-- completion 3 -> reward 3
+  +-- completion 4 -> reward 4
+                         |
+                         v
+                 Group mean / std
+                         |
+                         v
+                Relative advantages
+                         |
+                         v
+                 GRPO policy update
+```
+
+The Day 2 reward model is reused as the frozen reward function.
+
+Unlike PPO, this GRPO baseline does not use:
+
+```text
+Value model
+GAE
+Value loss
+Reference-policy KL
+```
+
+The final configuration uses:
+
+```text
+beta = 0
+```
+
+so no frozen reference model is loaded.
+
+---
+
+### Prompt Dataset
+
+The GRPO dataset is derived directly from the same prompt pool used for PPO.
+
+The Day 4 tokenized prompts were decoded back into GRPOTrainer-compatible prompt strings without changing the underlying chat-template structure.
+
+```text
+Train prompts: 49,797
+Eval prompts:     100
+Columns:        ['prompt']
+```
+
+The prompt format retains the Qwen3 assistant generation prefix:
+
+```text
+<|im_start|>assistant
+<think>
+
+</think>
+```
+
+This keeps the SFT, PPO, and GRPO input formats aligned.
+
+---
+
+### Manual Group-Relative Advantage Inspection
+
+Before training, one prompt was sampled four times using the SFT policy.
+
+The resulting rewards were:
+
+```text
+Response 1: -1.679688
+Response 2: -0.578125
+Response 3: -1.773438
+Response 4: -1.679688
+```
+
+with:
+
+\[
+\text{group mean}=-1.427734
+\]
+
+and:
+
+\[
+\text{group std}=0.568128.
+\]
+
+The corresponding normalized advantages were:
+
+| Response | Reward | Advantage | Update direction |
+|---|---:|---:|---|
+| 1 | -1.6797 | -0.4434 | suppress |
+| 2 | -0.5781 | **+1.4952** | reinforce |
+| 3 | -1.7734 | -0.6084 | suppress |
+| 4 | -1.6797 | -0.4434 | suppress |
+
+Although every absolute reward was negative, Response 2 received a strong positive advantage because it was the best completion within the group.
+
+This illustrates the central GRPO idea:
+
+> optimization depends on relative performance among completions generated for the same prompt rather than on the absolute reward sign.
+
+---
+
+### Reward-Model Interface Test
+
+A one-step dry run was performed with:
+
+```text
+learning_rate = 0
+num_generations = 4
+max_steps = 1
+```
+
+The full GRPOTrainer pipeline successfully executed:
+
+```text
+generation
+-> reward-model scoring
+-> group-relative normalization
+-> GRPO loss
+-> backward pass
+```
+
+The test produced:
+
+```text
+Mean reward:             -0.9170
+Reward std:               0.4507
+Zero-reward-std fraction: 0%
+Gradient norm:            8.625
+```
+
+The policy parameters were unchanged, confirming that the zero-learning-rate dry run did not modify the SFT checkpoint.
+
+---
+
+### GRPO Smoke Training
+
+A 16-step GRPO smoke test was then run with a nonzero learning rate.
+
+```text
+Learning rate:            1e-6
+Group size:               4
+Max completion length:    256
+Loss type:                GRPO
+Reward scaling:           group
+KL beta:                  0
+```
+
+The policy weights changed successfully:
+
+```text
+Probe parameter:
+model.layers.0.self_attn.q_proj.weight
+
+Changed elements: 242 / 8192
+Max absolute change: 6.68e-06
+Policy updated: True
+```
+
+Smoke-test statistics:
+
+| Metric | Value |
+|---|---:|
+| Mean reward | -0.1809 |
+| Mean reward std | 1.3812 |
+| Zero-std groups | 0% |
+| Mean completion length | 184.69 |
+| Truncated completion ratio | 39.06% |
+| Mean gradient norm | 16.13 |
+| Mean entropy | 0.4325 |
+
+The nonzero reward variance confirmed that GRPO received meaningful relative learning signals across all sampled groups.
+
+---
+
+### Completion-Length Ablation
+
+A controlled test compared maximum completion lengths of 256 and 384 tokens.
+
+| Metric | 256 | 384 |
+|---|---:|---:|
+| Mean reward | -0.1809 | -0.0771 |
+| Mean reward std | 1.3812 | 1.5699 |
+| Zero-std groups | 0% | 0% |
+| Mean completion length | 184.69 | 214.83 |
+| Truncated completion ratio | **39.06%** | **34.38%** |
+| Mean gradient norm | 16.13 | 17.29 |
+| Max gradient norm | 104.5 | 97.0 |
+| Mean entropy | 0.4325 | 0.3667 |
+
+Increasing the maximum generation budget by 50% reduced truncation by only 4.68 percentage points.
+
+Therefore:
+
+```text
+max_completion_length = 256
+```
+
+was retained for the main experiment.
+
+---
+
+### Main GRPO Configuration
+
+```text
+Policy initialization       Day 1 SFT
+Reward model                frozen Day 2 RM
+
+Train prompts               49,797
+Training steps              1,024
+
+Group size                  4
+Sampled completions         ~4,096
+
+Learning rate               1e-6
+Scheduler                   linear
+
+Max completion length       256
+Temperature                 0.7
+Top-p                       0.95
+
+Loss type                   grpo
+Reward scaling              group
+GRPO iterations             1
+Clip epsilon                0.2
+
+Reference KL beta           0.0
+
+Gradient clipping           1.0
+Precision                   BF16
+Training                    full-parameter
+```
+
+The approximately 4,096 sampled completions were chosen to provide a rollout budget comparable in scale to the 4,096 online responses used in the PPO baseline.
+
+The final model is stored at:
+
+```text
+outputs/qwen3-0.6b-grpo
+```
+
+---
+
+### Main GRPO Training Results
+
+The full training run completed successfully:
+
+```text
+Steps:      1,024
+Runtime:    ~69 minutes
+```
+
+Overall training statistics:
+
+| Metric | Value |
+|---|---:|
+| Mean reward | +0.0528 |
+| Mean reward std | 1.5193 |
+| Zero-std groups | 0.78% |
+| Mean completion length | 142.85 |
+| Truncated completion ratio | 32.37% |
+| Mean terminated length | 90.61 |
+| Mean entropy | 0.4822 |
+| Mean gradient norm | 29.21 |
+| Max raw gradient norm | 488 |
+| Mean step time | 3.98 s |
+
+Reward diversity remained strong throughout training, with fewer than 1% of sampled groups having zero reward variance.
+
+This indicates that meaningful group-relative advantages remained available for almost all training groups.
+
+---
+
+### Training Dynamics
+
+| Metric | Q1 | Q2 | Q3 | Q4 |
+|---|---:|---:|---:|---:|
+| Mean reward | +0.0361 | +0.0725 | +0.0779 | +0.0246 |
+| Reward std | 1.5903 | 1.4717 | 1.5153 | 1.4998 |
+| Zero-std groups | 1.17% | 0.78% | 0.39% | 0.78% |
+| Mean completion length | 141.25 | 144.12 | 150.61 | 135.42 |
+| Truncated ratio | 31.54% | 31.15% | 35.45% | 31.35% |
+| Entropy | 0.5018 | 0.4741 | 0.4700 | 0.4830 |
+
+There was no evidence of reward-variance collapse or policy-entropy collapse.
+
+Raw reward did not show a monotonic trend across training quarters. As with PPO, different quarters contain different shuffled prompts, so online training reward is not treated as a controlled model-quality metric.
+
+The final model is instead evaluated on a fixed held-out benchmark.
+
+---
+
+### Held-Out Evaluation: SFT vs GRPO
+
+The final GRPO checkpoint was evaluated on the same 1,000 held-out prompts used for DPO and PPO.
+
+For each prompt:
+
+```text
+SFT  -> greedy response
+GRPO -> greedy response
+
+Frozen Day 2 RM -> score both responses
+```
+
+Results:
+
+| Metric | Result |
+|---|---:|
+| GRPO wins | 301 |
+| SFT wins | 302 |
+| Ties | 397 |
+| GRPO non-tie win rate | 49.92% |
+| Mean SFT reward | 0.436594 |
+| Mean GRPO reward | **0.458999** |
+| Mean reward improvement | **+0.022405** |
+
+GRPO therefore did not win more frequently than the SFT baseline, but produced a small positive shift in average reward.
+
+---
+
+### GRPO Response-Change Analysis
+
+```text
+Identical responses: 383 / 1000 = 38.30%
+Changed responses:   617 / 1000 = 61.70%
+```
+
+Among changed responses:
+
+```text
+GRPO wins:       301
+SFT wins:        302
+Reward ties:      14
+
+GRPO non-tie win rate: 49.92%
+```
+
+Therefore GRPO substantially changed model behavior, but the direction of these changes was nearly balanced in terms of win/loss frequency.
+
+---
+
+### GRPO Reward-Margin Analysis
+
+Define:
+
+\[
+m_{\mathrm{GRPO}}
+=
+R(\mathrm{GRPO})
+-
+R(\mathrm{SFT}).
+\]
+
+The held-out reward margins were:
+
+```text
+Positive margins:        301
+Negative margins:        302
+Zero margins:            397
+
+Mean margin:            +0.022405
+Median margin:           0.000000
+
+Mean absolute margin:    0.434851
+Mean positive margin:   +0.759561
+Mean negative margin:   -0.682859
+```
+
+Although the number of positive and negative comparisons was nearly identical, positive GRPO changes had a larger average magnitude than negative changes:
+
+\[
+0.7596 > 0.6829.
+\]
+
+This explains why the win rate remained approximately 50% while the average reward difference was slightly positive.
+
+---
+
+# Final Comparison — DPO vs PPO vs GRPO
+
+All three post-training methods were evaluated using the same protocol:
+
+```text
+Same Day 1 SFT initialization
+Same held-out test_prefs split
+Same 1,000 evaluation prompts
+Same greedy decoding
+Same frozen Day 2 Reward Model
+Same SFT baseline
+```
+
+The SFT mean reward was identical across all three evaluations:
+
+\[
+R_{\mathrm{SFT}}=0.436594.
+\]
+
+This provides a consistent reference point for the comparison.
+
+## Held-Out Preference Results
+
+| Metric | DPO | PPO | GRPO |
+|---|---:|---:|---:|
+| Aligned-model wins | **404** | 303 | 301 |
+| SFT wins | 322 | 304 | 302 |
+| Ties | 274 | 393 | 397 |
+| Non-tie win rate | **55.65%** | 49.92% | 49.92% |
+| Mean aligned reward | **0.529781** | 0.427900 | 0.458999 |
+| Mean reward improvement | **+0.093187** | -0.008694 | **+0.022405** |
+| Identical responses | 260 | 381 | 383 |
+| Changed responses | **740** | 619 | 617 |
+
+---
+
+## Reward-Margin Comparison
+
+| Metric | DPO | PPO | GRPO |
+|---|---:|---:|---:|
+| Positive margins | **404** | 303 | 301 |
+| Negative margins | 322 | 304 | 302 |
+| Zero margins | 274 | 393 | 397 |
+| Mean margin | **+0.093187** | -0.008694 | +0.022405 |
+| Mean positive margin | **+0.886586** | +0.717602 | +0.759561 |
+| Mean negative margin | -0.822964 | -0.743841 | **-0.682859** |
+| Mean absolute margin | **0.623175** | 0.443561 | 0.434851 |
+| Changed-response mean margin | **+0.125928** | -0.014046 | — |
+
+---
+
+## Interpretation
+
+### DPO
+
+DPO produced the clearest positive preference shift.
+
+It changed the largest number of held-out responses:
+
+\[
+740/1000=74\%.
+\]
+
+Among non-tied comparisons, DPO won:
+
+\[
+55.65\%.
+\]
+
+Its average reward improvement was:
+
+\[
+\boxed{+0.0932}.
+\]
+
+DPO therefore changed both the magnitude and the direction of model behavior more consistently toward the preference distribution represented by the reward model.
+
+---
+
+### PPO
+
+PPO training was numerically stable and the critic learned successfully, but this did not translate into better held-out preference performance.
+
+PPO changed:
+
+\[
+61.9\%
+\]
+
+of greedy responses, but among changed non-tied responses:
+
+```text
+PPO wins: 303
+SFT wins: 304
+```
+
+The positive and negative changes were nearly symmetric, and negative changes were slightly larger in magnitude.
+
+The final reward difference was:
+
+\[
+\boxed{-0.0087}.
+\]
+
+Thus, under this configuration, PPO produced behavioral change without a consistent positive preference direction.
+
+---
+
+### GRPO
+
+GRPO also changed a substantial fraction of responses:
+
+\[
+61.7\%.
+\]
+
+Its win/loss frequency was almost exactly balanced:
+
+```text
+GRPO wins: 301
+SFT wins:  302
+```
+
+However, GRPO's positive changes were larger on average than its negative changes:
+
+\[
++0.7596
+\quad\text{vs.}\quad
+-0.6829.
+\]
+
+This produced a small positive mean reward shift:
+
+\[
+\boxed{+0.0224}.
+\]
+
+GRPO therefore performed better than the PPO baseline on average reward, although it did not demonstrate the consistent directional improvement observed with DPO.
+
+---
+
+## Overall Result
+
+Under this specific experimental setup:
+
+\[
+\boxed{
+\text{DPO} > \text{GRPO} > \text{PPO}
+}
+\]
+
+in terms of mean held-out reward improvement:
+
+\[
+\boxed{
++0.0932
+>
++0.0224
+>
+-0.0087
+}
+\]
+
+However, this ordering should not be interpreted as a general ranking of the algorithms.
+
+The three methods differ fundamentally in their training objectives and data usage:
+
+```text
+DPO
+  -> offline chosen/rejected preference pairs
+
+PPO
+  -> online generation
+  -> reward model
+  -> value model / critic
+  -> GAE
+
+GRPO
+  -> online grouped generation
+  -> reward model
+  -> group-relative advantages
+```
+
+The training budgets are also not perfectly equivalent. The PPO and GRPO experiments were designed as practical single-GPU baselines rather than exhaustive hyperparameter searches.
+
+Therefore, the main conclusion is:
+
+> In this Qwen3-0.6B + UltraFeedback experiment, DPO produced the strongest and most consistent held-out preference improvement. GRPO produced a smaller positive average reward shift through larger positive than negative reward margins, while the tested PPO configuration remained approximately neutral relative to the SFT baseline.
+
+---
+
+## Practical Takeaways
+
+- **DPO** was the simplest method operationally and produced the strongest held-out preference improvement in this experiment.
+- **PPO** required the most complex training architecture because it used a policy, reference policy, reward model, and trainable value model.
+- **GRPO** removed the critic and replaced value-based credit assignment with relative comparison among multiple completions from the same prompt.
+- GRPO maintained strong group-level reward diversity throughout training.
+- Stable optimization alone did not guarantee improved held-out preference performance.
+- Online RL methods were more sensitive to reward quality, rollout behavior, and training-budget choices than DPO.
+- Using the same held-out prompts and frozen reward model was essential for making the three approaches meaningfully comparable.
+
+---
+
+## Day 5 Main Scripts
+
+```text
+scripts/inspect_grpo_group.py
+    Manually inspect group rewards and relative advantages.
+
+scripts/test_grpo_reward_interface.py
+    Validate GRPOTrainer integration with the Day 2 reward model.
+
+scripts/prepare_grpo_dataset.py
+    Convert the prompt-only PPO dataset into GRPO format.
+
+scripts/train_grpo_smoke.py
+    Run GRPO smoke tests and completion-length ablations.
+
+scripts/summarize_grpo_length_test.py
+    Compare GRPO rollout-length configurations.
+
+scripts/train_grpo.py
+    Run the main GRPO experiment.
+
+scripts/summarize_grpo_training.py
+    Aggregate GRPO training diagnostics.
+
+scripts/evaluate_sft_vs_grpo.py
+    Evaluate SFT versus GRPO on 1,000 held-out prompts.
+
+scripts/analyze_grpo_evaluation.py
+    Analyze response changes and GRPO reward margins.
+```
+
+---
+
+# Project-Level Summary
+
+The complete project now covers the major stages of modern LLM post-training:
+
+```text
+Base Qwen3-0.6B
+      |
+      v
+     SFT
+      |
+      +--------------------+
+      |                    |
+      v                    v
+Reward Modeling           DPO
+      |
+      +--------------------+
+      |                    |
+      v                    v
+     PPO                  GRPO
+```
+
+The implementation progressed from supervised learning and preference modeling to both offline and online alignment algorithms, with controlled held-out evaluation used to compare their behavioral effects.
+
+The most important empirical observation was that **training stability and policy change are not sufficient evidence of successful alignment**. The direction and magnitude of held-out preference shifts must be measured explicitly.
